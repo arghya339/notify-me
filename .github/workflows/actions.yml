@@ -1,0 +1,137 @@
+name: Fetching Data
+on:
+  push:
+    branches: [ "main" ]
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  mb_bios_version_check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      should-release: ${{ steps.compare_verisons.outputs.release }}
+      file-name: ${{ steps.get_data.outputs.file_name }}
+      file-size: ${{ steps.get_data.outputs.file_size }}
+      remote-bios-version: ${{ steps.get_data.outputs.remote_bios_version }}
+      local-bios-version: ${{ steps.get_data.outputs.local_bios_version }}
+      file-description: ${{ steps.get_data.outputs.file_description }}
+      file-release-date: ${{ steps.get_data.outputs.file_release_date }}
+      file-path: ${{ steps.get_data.outputs.file_path }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install curl-cffi
+        run: pip install curl-cffi
+      - name: Update ubuntu
+        run: sudo apt update
+      - name: Install jq
+        run: sudo apt install jq -y
+      - name: Fetching gigabyte-b660m-ds3h-ax-ddr4 latest bios data
+        run: python3 -c "from curl_cffi import requests; print(requests.get('https://www.gigabyte.com/iisApplicationNuxt/api/proxyFast/api/v1.0/Consumer/global/GetProductTabDataAsync/Support/8159', impersonate='chrome124').text)" | jq -r '.data[0].child[] | select(.key == "bios") | .data | reverse | .[0]'
+      - name: Get BIOS data
+        id: get_data
+        run: |
+          responseJson=$(python3 -c "from curl_cffi import requests; print(requests.get('https://www.gigabyte.com/iisApplicationNuxt/api/proxyFast/api/v1.0/Consumer/global/GetProductTabDataAsync/Support/8159', impersonate='chrome').text)" | jq -r '.data[0].child[] | select(.key == "bios") | .data | reverse | .[0]')
+          fileName=$(jq -r '.fileName' <<< "$responseJson")
+          echo "file_name=$fileName" >> $GITHUB_OUTPUT
+          fileSize=$(jq -r '.fileSize' <<< "$responseJson")
+          fileSizeMB=$(awk "BEGIN {printf \"%.2f\", $fileSize / 1048576}")
+          echo "file_size=$fileSizeMB" >> $GITHUB_OUTPUT
+          remoteBiosVersion=$(jq -r '.fileVersion' <<< "$responseJson")
+          echo "remote_bios_version=$remoteBiosVersion" >> $GITHUB_OUTPUT
+          [ -d "bash/gigabyte-b660m-ds3h-ax-ddr4" ] || mkdir -p bash/gigabyte-b660m-ds3h-ax-ddr4
+          [ -f "bash/gigabyte-b660m-ds3h-ax-ddr4/.version" ] || touch bash/gigabyte-b660m-ds3h-ax-ddr4/.version
+          [ -s "bash/gigabyte-b660m-ds3h-ax-ddr4/.version" ] || echo "0" > bash/gigabyte-b660m-ds3h-ax-ddr4/.version
+          localBiosVersion=$(cat bash/gigabyte-b660m-ds3h-ax-ddr4/.version)
+          echo "local_bios_version=$localBiosVersion" >> $GITHUB_OUTPUT
+          fileDescription=$(jq -r '.fileDescription | tostring | gsub("\n"; " ")' <<< "$responseJson")
+          echo "file_description=$fileDescription" >> $GITHUB_OUTPUT
+          fileReleaseDate=$(jq -r '.fileReleaseDate' <<< "$responseJson")
+          readableReleaseDate=$(date -d "$fileReleaseDate" "+%B %d, %Y")
+          echo "file_release_date=$readableReleaseDate" >> $GITHUB_OUTPUT
+          filePath=$(jq -r '.filePath' <<< "$responseJson")
+          echo "file_path=$filePath" >> $GITHUB_OUTPUT
+      - name: Compare versions
+        id: compare_verisons
+        run: |
+          if [[ "${{ steps.get_data.outputs.remote_bios_version }}" != "${{ steps.get_data.outputs.local_bios_version }}" ]]; then
+            echo "release=true" >> $GITHUB_OUTPUT
+            echo "Update available"
+          else
+            echo "release=false" >> $GITHUB_OUTPUT
+            echo "BIOS is up to date"
+          fi
+      - name: "Delete previous run of 2nd skipped job"
+        continue-on-error: true
+        run: |
+          databaseId=$(curl -sL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs" | jq -r --arg wn "$GITHUB_WORKFLOW" '.workflow_runs[1] | select(.name == $wn) | .id')
+          ([ -n "$databaseId" ] && [ "$databaseId" != "null" ]) && releaseConclusion=$(curl -sL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$databaseId/jobs" | jq -r '.jobs[] | select(.name == "release").conclusion')
+          [ "$releaseConclusion" == "skipped" ] && { curl -sX DELETE -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$databaseId" && echo "Run deleted."; } || true
+
+  release:
+    needs: mb_bios_version_check
+    runs-on: ubuntu-latest
+    if: needs.mb_bios_version_check.outputs.should-release == 'true'
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Update version
+        run: echo "${{ needs.mb_bios_version_check.outputs.remote-bios-version }}" > bash/gigabyte-b660m-ds3h-ax-ddr4/.version
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global --add safe.directory ${{ github.workspace }}
+          [ "$(git --no-pager log -1 --pretty=%s)" == "Update version" ] && git reset --soft HEAD~1
+          git add bash/gigabyte-b660m-ds3h-ax-ddr4/.version
+          git diff --cached --quiet || git commit -m "Update version"
+          git push -f
+      - name: Update ubuntu
+        run: sudo apt update
+      - name: Install html2text
+        run: sudo apt install html2text -y
+      - name: Generate Release Body
+        run: |
+          fileDescription=$(html2text <<< "${{ needs.mb_bios_version_check.outputs.file-description }}")
+          cat > ${{ github.workspace }}/CHANGELOG.txt << EOF
+          **BIOS Version:** ${{ needs.mb_bios_version_check.outputs.remote-bios-version }}
+          **Release Date:** ${{ needs.mb_bios_version_check.outputs.file-release-date }}
+          **Changelog:**
+          \`\`\`
+          $fileDescription
+          \`\`\`
+          **File Size:** ${{ needs.mb_bios_version_check.outputs.file-size }} MB
+          **Download:** [${{ needs.mb_bios_version_check.outputs.file-name }}.zip](${{ needs.mb_bios_version_check.outputs.file-path }})
+          **Support:** https://www.gigabyte.com/Motherboard/B660M-DS3H-AX-DDR4-rev-1x/support#Support-Bios
+          EOF
+      - name: Create & Publish a new release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ needs.mb_bios_version_check.outputs.remote-bios-version }}
+          name: ${{ needs.mb_bios_version_check.outputs.file-name }}
+          bodyFile: ${{ github.workspace }}/CHANGELOG.txt
+          prerelease: false
+          allowUpdates: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: "Delete previous run of 2nd success job"
+        continue-on-error: true
+        run: |
+          databaseId=$(curl -sL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs" | jq -r --arg wn "$GITHUB_WORKFLOW" '.workflow_runs[1] | select(.name == $wn) | .id')
+          ([ -n "$databaseId" ] && [ "$databaseId" != "null" ]) && releaseConclusion=$(curl -sL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$databaseId/jobs" | jq -r '.jobs[] | select(.name == "release").conclusion')
+          [ "$releaseConclusion" == "success" ] && { curl -sX DELETE -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$databaseId" && echo "Run deleted."; } || true
