@@ -110,6 +110,9 @@ jobs:
         run: |
           fileDescription=$(html2text <<< "${{ needs.mb_bios_version_check.outputs.file-description }}")
           cat > ${{ github.workspace }}/CHANGELOG.txt << EOF
+          > [!WARNING]
+          > Because BIOS flashing is potentially risky, if you do not encounter problems using the current version of BIOS, it is recommended that you not flash the BIOS. To flash the BIOS, do it with caution. Inadequate BIOS flashing may result in system malfunction.
+          
           **BIOS Version:** ${{ needs.mb_bios_version_check.outputs.remote-bios-version }}
           **Release Date:** ${{ needs.mb_bios_version_check.outputs.file-release-date }}
           **Changelog:**
